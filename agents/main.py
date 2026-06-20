@@ -2,6 +2,8 @@
 
 import os
 import json
+import time
+from collections import deque
 from typing import Any, Dict, List, Optional
 
 try:
@@ -26,6 +28,13 @@ class Agent:
 
         self.tools = MarketResearchTools()
         self.guardrails = SafetyGuardrails()
+
+        # In-process sliding-window of recent request timestamps. This tracks
+        # the request rate for a single process only; a shared store (e.g. the
+        # Redis service defined in docker-compose) is required for rate limiting
+        # across multiple workers/replicas in production.
+        self.rate_limit_window_seconds = 60
+        self._request_times: deque = deque()
 
         # Initialize LLM client if openai is available
         self.client = None
@@ -58,13 +67,24 @@ class Agent:
                         "response": None
                     }
 
-        # Check rate limit
-        request_count = int(os.environ.get("REQUEST_COUNT", "0"))
-        if not self.guardrails.check_rate_limit(request_count):
+        # Check rate limit using an in-process sliding window. Evict timestamps
+        # older than the window, then count the requests remaining in it.
+        now = time.monotonic()
+        window_start = now - self.rate_limit_window_seconds
+        while self._request_times and self._request_times[0] < window_start:
+            self._request_times.popleft()
+
+        request_count = len(self._request_times)
+        if not self.guardrails.check_rate_limit(
+            request_count, window_seconds=self.rate_limit_window_seconds
+        ):
             return {
                 "error": "rate_limited",
                 "response": None
             }
+
+        # Record this request only once it is admitted.
+        self._request_times.append(now)
 
         # If client is available, use it; otherwise return placeholder response
         if self.client:

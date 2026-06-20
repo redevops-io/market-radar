@@ -41,6 +41,12 @@ class SafetyGuardrails:
     def validate_input(self, user_input: str) -> Dict[str, Any]:
         """Validate incoming user input against guardrails.
 
+        NOTE: This is a coarse, best-effort content filter, NOT a security
+        control. It does a naive substring match against blocked-topic tokens
+        (e.g. "illegal_activities"), which real user inputs rarely contain
+        verbatim, so it should be treated as advisory only. Do not rely on it
+        to block adversarial or malicious input.
+
         Args:
             user_input: The raw user input string.
 
@@ -50,7 +56,7 @@ class SafetyGuardrails:
         if not self.enabled:
             return {"valid": True, "reason": "guardrails_disabled"}
 
-        # Check for blocked topics
+        # Best-effort substring match against blocked-topic tokens (advisory).
         for topic in self.blocked_topics:
             if topic.lower() in user_input.lower():
                 return {
