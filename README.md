@@ -1,115 +1,155 @@
-# redevops.io: Agentic Competitor & Market Intelligence Platform
+# agentic-market-radar — agent layer + dashboard over a real changedetection.io core
 
-Open-source, self-hostable AI platform for automated competitor intelligence and market research. Designed for SME owners who need strategic insights without the operational overhead.
+A competitive-intelligence module (Crayon/Klue style) for a roofing SME, built on the
+**agentic-billing** reference pattern. It wraps the running self-hosted
+**changedetection.io** instance (the open-source website-change-monitoring core) with:
 
-## The Problem: Why redevops?
+- an **agent layer** that reads REAL watch data over its REST API, and
+- an **MD3 dashboard** rendered from that live data (no mock data),
 
-### Pain → Legacy → Redevops
-
-**Pain**: SME owners spend 80% of their day on operations, wearing multiple hats (founder, sales, marketing, HR, accounting). Strategic competitor monitoring becomes the first thing to drop. Owners report spending 6+ hours weekly on manual admin tasks alone, with competitor research adding another 10-20 hours of repetitive work.
-
-**Legacy**: Most SMEs rely on:
-- Manual Google searches (quarterly, if that)
-- Ad-hoc spreadsheet tracking (outdated within weeks)
-- Gut feeling and reactive customer complaints
-- Occasional employee "let me check" updates
-
-**Redevops**: Automated, continuous competitor intelligence running 24/7. Set it up once, get real-time alerts on pricing changes, new product launches, market positioning shifts, and customer sentiment changes—without lifting a finger.
-
-## Ideal Customer Profile (ICP)
-
-- **SME Owners & Founders** wearing multiple hats
-- **Marketing Managers** at 10-200 person companies
-- **Product Teams** needing competitive insights without dedicated analysts
-- **Consultants & Agencies** serving multiple SME clients
-- **E-commerce businesses** tracking competitor pricing and promotions
-
-## Value Propositions
-
-1. **Reclaim 15+ hours/week**: Automate manual competitor research and spreadsheet updates
-2. **Never miss a change**: Real-time monitoring of competitor websites, pricing, and content
-3. **Strategic clarity**: Get actionable insights, not just data dumps
-4. **Self-hosted & private**: Your competitive intelligence stays on your infrastructure
-5. **Open-source (AGPL)**: No vendor lock-in, full transparency, community-driven
-
-## Architecture Overview
-
-redevops follows a two-layer architecture:
+for the demo tenant **Summit Roofing Co.** (a roofing contractor). Every watch is a
+competitor page, a price/pricing page, or a permits feed; the agent surfaces what
+changed and can spin up new monitors.
 
 ```
-┌─────────────────────────────────────────┐
-│         Agent Layer (Intelligence)      │
-│  • Competitor monitoring agents         │
-│  • Content analysis & summarization     │
-│  • Alert generation & routing           │
-│  • LangGraph-based orchestration        │
-└─────────────────────────────────────────┘
-                    ↓
-┌─────────────────────────────────────────┐
-│          OSS Core (Foundation)          │
-│  • PageCrawl / changedetection.io       │
-│  • Self-hosted agent infrastructure     │
-│  • Aegra platform integration           │
-│  • Data storage & retrieval             │
-└─────────────────────────────────────────┘
+changedetection.io (OSS core, :5001) ──REST /api/v1──▶ app.py (FastAPI, :8204) ──▶ MD3 dashboard + /api/activity + /agent/run
+        ▲                                                         agentic actions (add_watch, brief)
+        └── seed.py reads the api token from the datastore + creates the demo watches (idempotent)
 ```
 
-- **OSS Core**: Built on open-source foundations including PageCrawl and changedetection.io for web monitoring, with Aegra as the self-hosted agent infrastructure
-- **Agent Layer**: LangGraph-based agents that orchestrate competitor analysis, content extraction, and insight generation
+## Files
 
-## Quickstart
+| File | Purpose |
+|------|---------|
+| `seed.py` | Reads the api token from the container datastore, confirms via `GET /api/v1/systeminfo`, creates 5 roofing competitor/price/permit watches over REST (idempotent), writes `.env`. |
+| `app.py` | FastAPI service (port 8204): `/health`, `/api/activity`, `/` dashboard, `/agent/run`. |
+| `requirements.txt` | fastapi, uvicorn, httpx. |
+| `Dockerfile` | slim-python image running `uvicorn app:app --port 8204`. |
+| `.env` | Written by `seed.py`: `CD_API_URL`, `CD_API_KEY`, `CD_FRONT_URL`. |
 
-### Prerequisites
+## changedetection bootstrap method (the one that worked)
 
-- Docker & Docker Compose
-- 2GB+ RAM available
-- Basic command-line familiarity
+changedetection's REST API requires an api key in the `x-api-key` header. Unlike Lago,
+**we do not create the key** — changedetection generates it on first boot and stores it
+in its datastore. **Where to find it:**
 
-### Installation
+```bash
+sudo docker exec agentic-cores-changedetection-1 cat /datastore/changedetection.json \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["settings"]["application"]["api_access_token"])'
+# -> <your-changedetection-api-token>   (unique per host)
+```
 
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/redevops-io/market-radar.git
-   cd market-radar
-   ```
+(On this host the token lives at `settings.application.api_access_token` in
+`/datastore/changedetection.json`; older builds use `/datastore/url-watches.json`.
+`seed.py` checks both.) Confirm it works:
 
-2. **Configure environment**
-   ```bash
-   cp .env.example .env
-   # Edit .env with your settings (API keys, monitoring targets, etc.)
-   ```
+```bash
+curl -s http://localhost:5001/api/v1/systeminfo -H "x-api-key: <token>"
+# -> {"queue_size":0,"overdue_watches":[],"uptime":...,"watch_count":7,"version":"0.55.7"}
+```
 
-3. **Start the platform**
-   ```bash
-   docker compose up -d
-   ```
+Key facts for changedetection **0.55.7** (discovered against the running core):
 
-4. **Access the dashboard**
-   Open `http://localhost:8080` in your browser
+- The container is **`agentic-cores-changedetection-1`**, UI + REST on **:5001**
+  (maps container :5000).
+- Auth header is **`x-api-key: <token>`** (not Bearer).
+- `POST /api/v1/watch` takes `{"url","title","tag"}` where **`tag` is a
+  comma-separated string of tag titles** — changedetection auto-creates the tags and
+  returns `{"uuid": "..."}`. Watch creation is non-destructive (it only starts
+  observing a public page), so the agent does it without an approval gate.
+- A watch's display state is derived from three fields: `last_checked` (epoch),
+  `last_changed` (epoch; 0 = no diff yet), and `last_error` (bool). "Unread" =
+  `last_changed > 0 and not viewed`.
+- Newly-seeded watches have no diffs yet (`last_changed: 0`) — expected. Pages that
+  block the fetcher surface as `last_error` → a **"check error"** state on the
+  dashboard (a real, useful signal, not a crash).
 
-5. **Add your first competitor**
-   - Navigate to Competitors → Add New
-   - Enter the competitor website URL
-   - Select monitoring frequency (default: hourly)
-   - Choose what to track (pricing, content, features, etc.)
+## Seed + run
 
-### First Steps After Setup
+```bash
+cd agents/market-radar
 
-1. **Configure monitoring targets**: Add 3-5 key competitors to start
-2. **Set up alerts**: Configure email/Slack notifications for significant changes
-3. **Review initial insights**: Check the dashboard after 24 hours for trend analysis
-4. **Customize agent behavior**: Adjust analysis depth and alert thresholds in Settings
+# 1. Seed changedetection (idempotent — safe to re-run; writes .env with the live token)
+python3 seed.py
+#   → Found api_access_token in /datastore/changedetection.json
+#   → systeminfo OK: version=0.55.7 watch_count=2
+#   → created 5 watches; SEED_OK watches_created=5 total_watches=7
+#   → Wrote .env (CD_API_URL, CD_API_KEY, CD_FRONT_URL)
 
-## Pricing
+# 2. Install deps + run the service
+pip install -r requirements.txt          # add --break-system-packages on PEP-668 hosts
+python3 -m uvicorn app:app --host 0.0.0.0 --port 8204
+#   app.py auto-loads .env, so CD_API_KEY is picked up with no manual copy.
 
-redevops is **100% free and open-source** (AGPL license). No tiers, no subscriptions, no hidden costs. You pay only for your own infrastructure.
+# Or with Docker (point CD_API_URL at the changedetection service, not localhost):
+docker build -t agentic-market-radar .
+docker run --rm -p 8204:8204 \
+  -e CD_API_URL=http://host.docker.internal:5001 \
+  -e CD_API_KEY=<token from .env> \
+  -e CD_FRONT_URL=http://192.168.40.8:5001 \
+  agentic-market-radar
+```
 
-For managed hosting options (if you prefer not to self-host), see our [Partner Program](./PARTNERS.md).
+## Environment variables
 
-## License
+| Var | Default | Meaning |
+|-----|---------|---------|
+| `CD_API_URL` | `http://localhost:5001` | changedetection REST base (`/api/v1`). |
+| `CD_API_KEY` | _(from .env)_ | `x-api-key` token = `settings.application.api_access_token`. |
+| `CD_FRONT_URL` | `http://192.168.40.8:5001` | changedetection UI link for the "Open in changedetection ↗" button (the hybrid / human-operable path). |
+| `PORT` | `8204` | uvicorn bind port. |
+| `ANTHROPIC_API_KEY` | _(optional)_ | If set, the `brief` action adds an LLM-written one-paragraph summary (model `claude-opus-4-8`). The endpoint works fully without it — the brief is computed from the real watch data. |
 
-AGPL-3.0 - See [LICENSE](LICENSE) for details. This is a self-hostable platform—you own your data and your deployment.
+## Endpoints
 
----
+- `GET /health` → `{"status":"ok","core":"changedetection","connected": <bool from /api/v1/systeminfo>}`
+- `GET /api/activity` → live KPIs (competitors tracked, changes this week, price moves,
+  unread changes) + the full watch list with title/tags/last_checked/last_changed/state,
+  all derived from changedetection REST. Cached 15s.
+- `GET /` → the MD3 market-radar dashboard rendered from the live watches. Header shows
+  "Market Radar" + "Summit Roofing Co.", a green
+  "agent active · core: changedetection connected" pill, a "data: live from
+  changedetection" badge, and an **"Open in changedetection ↗"** button. Layout: KPI
+  tiles, a competitor "watch" card grid with last-change pills, and a change-feed table.
+  An alert banner appears whenever a watch has an unread change.
+- `POST /agent/run` with `{"action": ...}`:
+  - `"add_watch"` `{url, title, tag?}` → `POST /api/v1/watch` (creates a new monitor).
+    Non-destructive → `"requires":"none"`, no approval needed.
+  - `"brief"` → reads the watch list + each watch's history
+    (`GET /api/v1/watch/{uuid}/history`) and summarizes recent changes. Read-only →
+    no approval. Adds an LLM brief if `ANTHROPIC_API_KEY` is set (guarded).
 
-**Built for SMEs who need enterprise-grade intelligence without enterprise complexity.**
+## Validation (actually run)
+
+```bash
+# api token location
+sudo docker exec agentic-cores-changedetection-1 cat /datastore/changedetection.json | ...
+#   → settings.application.api_access_token = <your-changedetection-api-token>
+
+# Live watches via the agent layer
+curl -s http://localhost:8204/api/activity
+#   → 7 watches; KPIs Competitors 7 · Changes 0 · Price moves 0 · Unread 0
+#     (seeded watches have no diff yet — expected; price/permit pages tagged)
+
+# Dashboard contains MD3 tokens + real competitor titles + Open in changedetection
+curl -s http://localhost:8204/ | grep -o 'Open in changedetection\|Apex Roofing — pricing\|Competitor watches'
+
+# Agentic actions
+curl -s -X POST http://localhost:8204/agent/run -d '{"action":"add_watch","url":"https://example.com","title":"Test competitor"}'
+#   → {"status":"done", "watch":{"uuid":"...","url":"https://example.com",...}}  (real watch created in the core)
+curl -s -X POST http://localhost:8204/agent/run -d '{"action":"brief"}'
+#   → {"status":"done","requires":"none (read-only ...)","watches_reviewed":N,"summary":"...", "reasoning":"..."}
+```
+
+## Replicating for the other cores
+
+Same recipe as `agentic-billing`:
+
+1. Point `CD_*` at the new core's API + key.
+2. Replace the `fetch_activity()` changedetection REST calls with the new core's
+   endpoints and a domain-specific KPI computation.
+3. Reuse `BASE_CSS` + the `_kpi_tiles` / `_competitor_grid` / `_change_feed` /
+   `_alert_banner` render helpers.
+4. Make `/agent/run` actions deterministic core API calls, with a human-approval gate on
+   anything destructive or money-moving (here both actions are safe, so none is needed).
+```
