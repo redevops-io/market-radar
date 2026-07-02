@@ -1,3 +1,14 @@
+> ### Reference application for [Context Runtime](https://github.com/redevops-io/context-runtime)
+>
+> A focused AI system for **competitive intelligence**. Context Runtime ships a tenant that learns **which competitor watches to sweep per intel question** — in its offline benchmark the learned policy scores **3.611 vs 0.403** against a full-sweep baseline ([`examples/market_radar.py`](https://github.com/redevops-io/context-runtime/blob/main/examples/market_radar.py)).
+>
+> ```
+> Context Runtime  →  ReDevOps RAG  →  Sidekick  →  Application logic
+> ```
+> One of the [ReDevOps](https://github.com/redevops-io) reference applications built on Context Runtime.
+
+---
+
 # agentic-market-radar — agent layer + dashboard over a real changedetection.io core
 
 A competitive-intelligence module (Crayon/Klue style) for a roofing SME, built on the
